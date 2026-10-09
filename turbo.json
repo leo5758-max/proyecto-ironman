@@ -1,0 +1,36 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "out/**"]
+    },
+    "web#build": {
+      "dependsOn": ["^build"],
+      "outputs": [".next/**"],
+      "env": [
+        "GEMINI_API_KEY",
+        "GEMINI_MODEL",
+        "GEMINI_LIVE_MODEL",
+        "KAN_GATEWAY_URL",
+        "KAN_GATEWAY_INTERNAL_TOKEN",
+        "NEXT_PUBLIC_KAN_GATEWAY_WS_URL",
+        "NEXT_PUBLIC_KAN_GATEWAY_LIVE_VOICE_WS_URL",
+        "NEXT_PUBLIC_SUPABASE_URL",
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+        "GROQ_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY"
+      ]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "lint": {},
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
+    "test": {}
+  }
+}

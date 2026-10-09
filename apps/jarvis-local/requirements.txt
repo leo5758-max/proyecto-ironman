@@ -1,0 +1,6 @@
+# Dependencias del prototipo local (deducidas de los import de los scripts).
+# Sin versiones fijadas: el prototipo no las traía. Fijarlas es parte de KAN-101.
+requests        # jarvis_memoria.py, jarvis_voz.py — llamadas a Ollama
+vosk            # jarvis_voz.py, prueba_voz.py — reconocimiento de voz sin internet
+sounddevice     # jarvis_voz.py, prueba_voz.py — captura del micrófono
+pyttsx3         # jarvis_voz.py — voz sintetizada sin internet

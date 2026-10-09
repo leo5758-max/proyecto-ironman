@@ -1,0 +1,45 @@
+import type { UserIdentity } from "../entities/UserIdentity";
+
+export interface PasswordCredentials {
+  email: string;
+  password: string;
+}
+
+/** Solo para el registro — `referralCode` (Mejora "sistema de referidos") viaja como
+ * metadata de Supabase Auth (`raw_user_meta_data.referral_code`) hasta el Database
+ * Webhook en apps/gateway, que es quien resuelve el código a un `referrer_id` y
+ * otorga la recompensa (ver ReferralRewardService, service_role). */
+export interface RegisterCredentials extends PasswordCredentials {
+  referralCode?: string;
+}
+
+/**
+ * Puerto de identidad/autenticación (ADR-017, docs/00). El adaptador real
+ * (`@kan/supabase-adapter`) recibe un cliente ya construido por inyección —
+ * este puerto no sabe nada de cookies, sesiones HTTP ni Next.js.
+ */
+export interface AuthPort {
+  registerWithPassword(credentials: RegisterCredentials): Promise<UserIdentity>;
+  signInWithPassword(credentials: PasswordCredentials): Promise<UserIdentity>;
+  /**
+   * `redirectTo` es a dónde debe volver el usuario tras hacer click en el
+   * link (ej. `${origin}/auth/callback` en apps/web) — el puerto no asume
+   * ningún transporte concreto, así que quien lo llama decide la URL.
+   */
+  sendMagicLink(email: string, redirectTo?: string): Promise<void>;
+  /**
+   * Arranca el flujo OAuth (ADR-017): devuelve la URL del proveedor a la que
+   * hay que redirigir al navegador — quien llama decide cómo (Server Action
+   * con `redirect()`, `window.location` del lado cliente, etc.).
+   */
+  getOAuthRedirectUrl(provider: "google", redirectTo: string): Promise<string>;
+  signOut(): Promise<void>;
+  /**
+   * `accessToken` (ADR-029, docs/00): si se pasa, valida ese JWT directo
+   * (mismo mecanismo que usaría un cliente sin cookies — ej. la app móvil,
+   * roadmap P7) en vez de mirar la sesión implícita del cliente inyectado.
+   * Sin `accessToken`, se comporta como siempre. `undefined` si no hay
+   * sesión activa (ni implícita ni vía el token dado).
+   */
+  getCurrentUser(accessToken?: string): Promise<UserIdentity | undefined>;
+}

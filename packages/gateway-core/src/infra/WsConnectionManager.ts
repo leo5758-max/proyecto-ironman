@@ -1,0 +1,299 @@
+import { WebSocketServer, WebSocket } from "ws";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
+import {
+  PROTOCOL_VERSION,
+  safeCompareToken,
+  type CoreToEdgeMessage,
+  type EdgeToCoreMessage,
+  type HelloMessage,
+} from "@kan/plugin-contract";
+import type { PairingPort } from "@kan/core";
+import type { AgentConnectionInfo, ConnectionManagerPort, Unsubscribe } from "../domain/ports/ConnectionManagerPort";
+import type { EdgeTicketPort } from "../domain/ports/EdgeTicketPort";
+
+const HELLO_TIMEOUT_MS = 10_000;
+const HEARTBEAT_TIMEOUT_MS = 45_000;
+const REAPER_INTERVAL_MS = 10_000;
+/** Los mensajes reales del protocolo son pequeños; evita que un socket envíe payloads gigantes (hallazgo A9 de docs/13). */
+const MAX_PAYLOAD_BYTES = 64 * 1024;
+/**
+ * Cap global de conexiones concurrentes (docs/16 P6, ADR-025) — hoy solo
+ * existe un único token compartido para todo el Gateway (sin identidad por
+ * agente a nivel de auth), así que este es un límite global de recursos, no
+ * "por token" literal. Protege contra sockets que pasan el auth pero nunca
+ * completan `hello`, o simplemente contra demasiadas conexiones a la vez.
+ */
+const DEFAULT_MAX_CONNECTIONS = 50;
+/**
+ * Rate limiting por mensaje (fix de auditoría de backend #7) — límite por
+ * conexión ya autenticada, no por IP/token: cada socket que ya pasó el
+ * hello puede mandar como máximo esta cantidad de mensajes por segundo
+ * (ventana fija de 1s). Un socket sobre el límite no se cierra — los
+ * mensajes de más simplemente se ignoran hasta que arranca la ventana
+ * siguiente, mismo criterio "no tumbar la conexión por una anomalía" que
+ * ya usa este archivo para mensajes con forma inesperada (hallazgo M5).
+ */
+const DEFAULT_MAX_MESSAGES_PER_SECOND = 100;
+const RATE_LIMIT_WINDOW_MS = 1000;
+
+interface TrackedConnection {
+  socket: WebSocket;
+  edgeAgentId?: string;
+  ownerId?: string;
+  /**
+   * Resuelto en `handleUpgrade()` para el camino de ticket (navegador) —
+   * ya prueba el dueño antes de que llegue el "hello", así que `onHello()`
+   * no pasa por `PairingPort` para esta conexión (docs/19 continuación).
+   */
+  preAuthenticatedOwnerId?: string;
+  lastSeen: number;
+  helloTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * `onHello()` es async (resuelve el `ownerId` antes de terminar, docs/19
+   * P2 incremento 3) — este flag cubre la ventana entre que llega un
+   * "hello" y que `conn.edgeAgentId` queda seteado, para que un segundo
+   * "hello" en esa ventana siga detectándose como duplicado (hallazgo A4
+   * de docs/13, antes garantizado gratis por ser todo síncrono).
+   */
+  helloInFlight?: boolean;
+  /** Rate limiting por mensaje — inicio de la ventana actual (epoch ms) y cuántos mensajes ya se contaron en ella. */
+  rateLimitWindowStart?: number;
+  rateLimitCount?: number;
+}
+
+function majorVersion(version: string): string {
+  return version.split(".")[0] ?? version;
+}
+
+function removeHandler<T>(list: T[], handler: T): void {
+  const index = list.indexOf(handler);
+  if (index !== -1) list.splice(index, 1);
+}
+
+/**
+ * Único módulo que toca el transporte WebSocket real (docs/12 §1). Corre en
+ * modo `noServer`: quien controla el `http.Server` (apps/gateway) decide
+ * cuándo delegarle un `upgrade` vía `handleUpgrade()`, para poder compartir
+ * el mismo puerto con la API HTTP.
+ */
+export class WsConnectionManager implements ConnectionManagerPort {
+  private readonly wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD_BYTES });
+  private readonly byAgentId = new Map<string, TrackedConnection>();
+  private readonly pending = new Set<TrackedConnection>();
+  private readonly connectedHandlers: Array<(info: AgentConnectionInfo) => void> = [];
+  private readonly disconnectedHandlers: Array<(edgeAgentId: string) => void> = [];
+  private readonly messageHandlers: Array<(edgeAgentId: string, message: EdgeToCoreMessage) => void> = [];
+  private reaper: ReturnType<typeof setInterval> | undefined;
+
+  constructor(
+    private readonly authToken: string,
+    private readonly maxConnections: number = DEFAULT_MAX_CONNECTIONS,
+    private readonly pairingPort?: PairingPort,
+    private readonly edgeTicketPort?: EdgeTicketPort,
+    private readonly allowedOrigins: string[] = [],
+    private readonly maxMessagesPerSecond: number = DEFAULT_MAX_MESSAGES_PER_SECOND,
+  ) {}
+
+  start(): void {
+    this.reaper = setInterval(() => this.reapDeadConnections(), REAPER_INTERVAL_MS);
+  }
+
+  stop(): void {
+    clearInterval(this.reaper);
+    this.wss.close();
+  }
+
+  /** Se invoca desde el evento 'upgrade' del http.Server de apps/gateway. */
+  handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+    const ticket = new URL(request.url ?? "/", "http://internal").searchParams.get("ticket");
+
+    let preAuthenticatedOwnerId: string | undefined;
+    if (ticket !== null) {
+      // Camino de ticket (navegador): el WebSocket nativo del browser no
+      // puede mandar el header Authorization, así que la prueba de dueño
+      // viaja acá — ver EdgeTicketPort. Nunca usa KAN_EDGE_TOKEN.
+      const claim = this.edgeTicketPort?.consume(ticket);
+      if (!claim) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      // Origin sí es confiable acá (a diferencia de un header custom, JS de
+      // browser no puede falsearlo) — por eso el chequeo es solo para este
+      // camino; el nativo (desktop/hardware) no manda un Origin significativo.
+      const origin = request.headers.origin;
+      if (!origin || !this.allowedOrigins.includes(origin)) {
+        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      preAuthenticatedOwnerId = claim.ownerId;
+    } else {
+      const authHeader = request.headers["authorization"];
+      const receivedToken = typeof authHeader === "string" ? authHeader : undefined;
+      if (!safeCompareToken(receivedToken, `Bearer ${this.authToken}`)) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+    }
+
+    if (this.pending.size + this.byAgentId.size >= this.maxConnections) {
+      socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    this.wss.handleUpgrade(request, socket, head, (ws) => this.onSocketConnected(ws, preAuthenticatedOwnerId));
+  }
+
+  send(edgeAgentId: string, message: CoreToEdgeMessage): boolean {
+    const conn = this.byAgentId.get(edgeAgentId);
+    if (!conn || conn.socket.readyState !== WebSocket.OPEN) return false;
+    conn.socket.send(JSON.stringify(message));
+    return true;
+  }
+
+  onAgentConnected(handler: (info: AgentConnectionInfo) => void): Unsubscribe {
+    this.connectedHandlers.push(handler);
+    return () => removeHandler(this.connectedHandlers, handler);
+  }
+
+  onAgentDisconnected(handler: (edgeAgentId: string) => void): Unsubscribe {
+    this.disconnectedHandlers.push(handler);
+    return () => removeHandler(this.disconnectedHandlers, handler);
+  }
+
+  onMessage(handler: (edgeAgentId: string, message: EdgeToCoreMessage) => void): Unsubscribe {
+    this.messageHandlers.push(handler);
+    return () => removeHandler(this.messageHandlers, handler);
+  }
+
+  getState(edgeAgentId: string): "connected" | "disconnected" {
+    const conn = this.byAgentId.get(edgeAgentId);
+    return conn && conn.socket.readyState === WebSocket.OPEN ? "connected" : "disconnected";
+  }
+
+  private onSocketConnected(socket: WebSocket, preAuthenticatedOwnerId?: string): void {
+    const conn: TrackedConnection = { socket, lastSeen: Date.now(), preAuthenticatedOwnerId };
+    this.pending.add(conn);
+    conn.helloTimer = setTimeout(() => {
+      if (this.pending.has(conn)) {
+        socket.close(4000, "hello no recibido a tiempo");
+        this.pending.delete(conn);
+      }
+    }, HELLO_TIMEOUT_MS);
+
+    socket.on("message", (raw) => this.onSocketMessage(conn, raw));
+    socket.on("close", () => this.onSocketClosed(conn));
+  }
+
+  private onSocketMessage(conn: TrackedConnection, raw: unknown): void {
+    conn.lastSeen = Date.now();
+    if (this.isOverRateLimit(conn)) return;
+
+    let message: EdgeToCoreMessage;
+    try {
+      message = JSON.parse(String(raw));
+    } catch {
+      return;
+    }
+
+    if (!message || typeof message !== "object" || typeof message.type !== "string") {
+      return; // forma inesperada — se ignora sin tumbar la conexión (hallazgo M5 de docs/13)
+    }
+
+    if (message.type === "hello") {
+      if (conn.edgeAgentId || conn.helloInFlight) {
+        // Un socket ya autenticado (o con un hello ya en curso) no debería volver a mandar "hello" — protocolo violado (hallazgo A4).
+        conn.socket.close(4003, "hello duplicado en la misma conexión");
+        return;
+      }
+      conn.helloInFlight = true;
+      void this.onHello(conn, message);
+      return;
+    }
+
+    if (!conn.edgeAgentId) return;
+    this.messageHandlers.forEach((handler) => handler(conn.edgeAgentId!, message));
+  }
+
+  private async onHello(conn: TrackedConnection, hello: HelloMessage): Promise<void> {
+    if (majorVersion(hello.protocolVersion) !== majorVersion(PROTOCOL_VERSION)) {
+      conn.socket.close(4001, "versión de protocolo incompatible");
+      this.pending.delete(conn);
+      return;
+    }
+
+    // Resuelve el ownerId antes de dar por conectado el agente (docs/19 P2,
+    // incremento 3). Si el pairingToken no resuelve (revocado, corrupto, o
+    // Supabase caído) la conexión NO se rechaza — sigue igual que hoy, sin
+    // ownerId. Rechazar tumbaría un dispositivo físico por un problema de
+    // identidad que todavía no bloquea nada (la autorización real es un
+    // incremento posterior).
+    // Camino de ticket (navegador): el dueño ya se resolvió en
+    // handleUpgrade() antes de aceptar el socket — no hay pairingToken que
+    // resolver ni PairingPort que consultar para esta conexión.
+    let ownerId: string | undefined = conn.preAuthenticatedOwnerId;
+    if (!ownerId && hello.pairingToken && this.pairingPort) {
+      try {
+        ownerId = await this.pairingPort.resolveOwner(hello.pairingToken, hello.edgeAgentId);
+      } catch {
+        ownerId = undefined;
+      }
+    }
+
+    // Si otro socket ya reclamaba este edgeAgentId (reconexión o colisión), se cierra
+    // explícitamente en vez de dejarlo como conexión zombie (hallazgo A4 de docs/13).
+    const existing = this.byAgentId.get(hello.edgeAgentId);
+    if (existing && existing !== conn) {
+      existing.socket.close(4004, "reemplazado por una nueva conexión del mismo Edge Agent");
+    }
+
+    clearTimeout(conn.helloTimer);
+    this.pending.delete(conn);
+    conn.edgeAgentId = hello.edgeAgentId;
+    conn.ownerId = ownerId;
+    this.byAgentId.set(hello.edgeAgentId, conn);
+
+    const info: AgentConnectionInfo = {
+      edgeAgentId: hello.edgeAgentId,
+      protocolVersion: hello.protocolVersion,
+      connectedAt: new Date().toISOString(),
+      hello,
+      ownerId,
+    };
+    this.connectedHandlers.forEach((handler) => handler(info));
+  }
+
+  /** Ventana fija de 1s (no sliding window/token bucket) — simple y suficiente para un límite "razonable", no una SLA de precisión. */
+  private isOverRateLimit(conn: TrackedConnection): boolean {
+    const now = Date.now();
+    if (conn.rateLimitWindowStart === undefined || now - conn.rateLimitWindowStart >= RATE_LIMIT_WINDOW_MS) {
+      conn.rateLimitWindowStart = now;
+      conn.rateLimitCount = 0;
+    }
+    conn.rateLimitCount = (conn.rateLimitCount ?? 0) + 1;
+    return conn.rateLimitCount > this.maxMessagesPerSecond;
+  }
+
+  private onSocketClosed(conn: TrackedConnection): void {
+    this.pending.delete(conn);
+    if (!conn.edgeAgentId) return;
+    if (this.byAgentId.get(conn.edgeAgentId) === conn) {
+      this.byAgentId.delete(conn.edgeAgentId);
+      this.disconnectedHandlers.forEach((handler) => handler(conn.edgeAgentId!));
+    }
+  }
+
+  private reapDeadConnections(): void {
+    const now = Date.now();
+    for (const [edgeAgentId, conn] of this.byAgentId) {
+      if (now - conn.lastSeen > HEARTBEAT_TIMEOUT_MS) {
+        conn.socket.close(4002, "heartbeat perdido");
+        this.byAgentId.delete(edgeAgentId);
+        this.disconnectedHandlers.forEach((handler) => handler(edgeAgentId));
+      }
+    }
+  }
+}

@@ -1,0 +1,706 @@
+@import "tailwindcss";
+
+/*
+ * Dark-por-defecto vía clase, no vía prefers-color-scheme (docs/17 §Tema):
+ * las clases dark: ya usadas en todo el proyecto pasan a activarse cuando
+ * <html> tiene la clase "dark" (forzada en app/layout.tsx), no cuando el
+ * sistema operativo está en modo oscuro. Un futuro toggle de tema (Light)
+ * solo necesita quitar esa clase — no reescribir CSS.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Design System v3 "Kukulkán" — identidad propia de KAN (dios maya de la
+ * sabiduría/el viento), reemplaza a v2 "Aurora". Ver DESIGN_SYSTEM.md para
+ * la tabla completa. Nombrados de forma neutral (no "web-*") para que
+ * apps/desktop pueda adoptarlos más adelante (docs/17).
+ *
+ * `--kan-accent` es el único color que el usuario elige (5 presets, ver
+ * selector en /configuracion) — todo lo demás (`--color-accent`, glow,
+ * gradiente) se deriva de esa única variable, nunca se pisa directo. El
+ * preset se aplica vía `data-kan-accent` en <html> (ThemeAccentPicker,
+ * localStorage — decisión visual pura, sin tabla nueva en Supabase).
+ */
+:root {
+  --kan-accent: #8b5cf6; /* violeta suave — default (rediseño inspirado en Gemini) */
+
+  --color-surface: #f6f5fb;
+  --color-surface-2: #ffffff;
+  --color-surface-3: #f0eefa;
+  --color-line: #e3e0f0;
+  --color-line-strong: #c9c4e0;
+  --color-ink: #14121f;
+  --color-ink-muted: #524f6c;
+  --color-ink-faint: #8a87a3;
+  --color-accent: color-mix(in srgb, var(--kan-accent) 82%, black);
+  --color-accent-2: var(--color-accent);
+  --color-success: #059669;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+
+  --gradient-accent: linear-gradient(135deg, var(--color-accent), color-mix(in srgb, var(--color-accent) 55%, black));
+  --glow-accent: 0 12px 40px -14px color-mix(in srgb, var(--color-accent) 45%, transparent);
+  --glow-accent-sm: 0 4px 18px -6px color-mix(in srgb, var(--color-accent) 50%, transparent);
+}
+
+/*
+ * Rediseño inspirado en Gemini — gris muy oscuro (#0f0f15), no negro puro:
+ * un fondo con un pelo de tinte violeta se siente "producto real" en vez de
+ * "terminal apagada". Texto secundario vuelve a ser un gris fijo (no
+ * derivado del acento como en el rediseño eDEX-UI anterior) — la tabla de
+ * colores de este pedido lo pide explícito ("gris claro, no amarillo/
+ * dorado"): que cambiar de preset tiña el texto secundario era demasiado,
+ * se sentía agresivo en vez de sutil.
+ */
+:root.dark {
+  --color-surface: #0f0f15;
+  --color-surface-2: #151520;
+  --color-surface-3: #1a1a25;
+  --color-line: #26262f;
+  --color-line-strong: #34343f;
+  --color-ink: #e8e8f0;
+  --color-ink-muted: #a8a8b8;
+  --color-ink-faint: #888899;
+  --color-accent: var(--kan-accent);
+  --color-accent-2: var(--color-accent);
+  --color-success: #22c97a;
+  --color-warning: #e0a020;
+  --color-danger: #e5484d;
+
+  --gradient-accent: linear-gradient(135deg, var(--color-accent), color-mix(in srgb, var(--color-accent) 45%, black));
+  --glow-accent: 0 16px 50px -14px color-mix(in srgb, var(--color-accent) 45%, transparent);
+  --glow-accent-sm: 0 6px 22px -6px color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+
+/*
+ * Presets de acento (spec de identidad KAN) — cada uno solo redefine
+ * `--kan-accent`, todo lo demás (glow, gradiente, texto en gradiente) se
+ * recalcula solo porque deriva de esa variable. ThemeAccentPicker
+ * (/configuracion) escribe el atributo + localStorage; sin JS, el default
+ * (esmeralda) ya definido arriba sigue aplicando.
+ */
+:root[data-kan-accent="gold"] {
+  --kan-accent: #f5a623;
+}
+:root[data-kan-accent="blue"] {
+  --kan-accent: #0066ff;
+}
+:root[data-kan-accent="red"] {
+  --kan-accent: #ff3333;
+}
+:root[data-kan-accent="white"] {
+  --kan-accent: #ffffff;
+}
+
+@theme inline {
+  --color-surface: var(--color-surface);
+  --color-surface-2: var(--color-surface-2);
+  --color-surface-3: var(--color-surface-3);
+  --color-line: var(--color-line);
+  --color-line-strong: var(--color-line-strong);
+  --color-ink: var(--color-ink);
+  --color-ink-muted: var(--color-ink-muted);
+  --color-ink-faint: var(--color-ink-faint);
+  --color-accent: var(--color-accent);
+  --color-accent-2: var(--color-accent-2);
+  --color-success: var(--color-success);
+  --color-warning: var(--color-warning);
+  --color-danger: var(--color-danger);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  --duration-fast: 150ms;
+  --duration-base: 300ms;
+  --duration-slow: 500ms;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  position: relative;
+  min-height: 100dvh;
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
+
+/*
+ * Rediseño inspirado en Gemini: sin glow ambiental, sin grilla HUD, sin
+ * scanlines — todo eso quedaba como "ruido visual" sobre un fondo que
+ * ahora se quiere limpio y respirado. `body` es el fondo entero, sin
+ * pseudo-elementos ni overlays encima.
+ */
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.fade-in {
+  animation: fade-in var(--duration-base) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes glow-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 10px color-mix(in srgb, var(--color-accent) 0%, transparent);
+  }
+}
+
+/*
+ * Utilidades de marca hechas a mano (mismo criterio que .fade-in): no son
+ * generables por Tailwind vía @theme porque son gradientes/efectos
+ * compuestos, no un solo token de color. Se usan como clases literales
+ * junto a utilities de Tailwind, nunca interpoladas.
+ */
+.text-gradient {
+  background-image: var(--gradient-accent);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+.bg-gradient-accent {
+  background-image: var(--gradient-accent);
+}
+
+/* Versión "soft" para chips de ícono — evita el modificador de opacidad de
+   Tailwind (bg-gradient-accent/15), que no aplica a clases hechas a mano. */
+.bg-gradient-accent-soft {
+  background-image: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--color-accent) 16%, transparent),
+    color-mix(in srgb, var(--color-accent-2) 16%, transparent)
+  );
+}
+
+.border-gradient {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--color-surface-2), var(--color-surface-2)) padding-box,
+    var(--gradient-accent) border-box;
+}
+
+.glass {
+  background: color-mix(in srgb, var(--color-surface-2) 55%, transparent);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid var(--color-line);
+}
+
+/*
+ * Rediseño inspirado en Gemini — esquinas redondas simples en vez de las
+ * geométricas "chamfered" (JARVIS/HUD) de rediseños anteriores. Quedan como
+ * los mismos dos nombres de clase (`.hud-panel`/`.hud-button`, ya usados en
+ * Card/Sidebar/InfoPanel/botones por toda la app) para no tener que tocar
+ * cada consumidor uno por uno — solo cambia CÓMO se ven, no dónde se usan.
+ * El borde de `.hud-panel::before` pasa a ser neutral (`--color-line`), no
+ * siempre teñido de acento — "colores de acento sutiles, no agresivos" pide
+ * dejar de pintar cada panel de la app con el borde del acento.
+ */
+.hud-panel {
+  border-radius: 16px;
+  position: relative;
+}
+
+.hud-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  border: 1px solid var(--color-line);
+}
+
+.hud-button {
+  border-radius: 9999px;
+}
+
+.glow-accent {
+  box-shadow: var(--glow-accent);
+}
+
+.glow-accent-sm {
+  box-shadow: var(--glow-accent-sm);
+}
+
+.animate-glow-pulse {
+  animation: glow-pulse 2s ease-out infinite;
+}
+
+/*
+ * KANAvatar — animaciones del núcleo (KANAvatar.tsx). Deliberadamente NO
+ * "suaves tipo Apple": easing marcado, escalas perceptibles, más HUD de
+ * Iron Man que transición de sistema operativo (pedido explícito del
+ * rediseño de identidad).
+ */
+@keyframes kan-core-idle {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 1;
+  }
+}
+
+@keyframes kan-core-listening {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.14);
+  }
+}
+
+@keyframes kan-core-thinking {
+  0%,
+  100% {
+    opacity: 0.65;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes kan-core-speaking {
+  0%,
+  20% {
+    transform: scaleY(0.85);
+  }
+  40% {
+    transform: scaleY(1.15);
+  }
+  60% {
+    transform: scaleY(0.92);
+  }
+  80% {
+    transform: scaleY(1.08);
+  }
+  100% {
+    transform: scaleY(0.85);
+  }
+}
+
+.kan-core-idle {
+  animation: kan-core-idle 3.2s ease-in-out infinite;
+}
+.kan-core-listening {
+  animation: kan-core-listening 0.9s ease-in-out infinite;
+}
+.kan-core-thinking {
+  animation: kan-core-thinking 1s ease-in-out infinite;
+}
+.kan-core-speaking {
+  animation: kan-core-speaking 0.6s ease-in-out infinite;
+}
+
+/* KANLayout — el panel entra como una hoja (mobile: "sheet" desde abajo; desktop: el mismo movimiento se lee como un panel que se despliega). */
+@keyframes kan-sheet-up {
+  from {
+    transform: translateY(28px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.kan-sheet {
+  animation: kan-sheet-up var(--duration-slow) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/*
+ * Scrollbar delgada del color del acento (Sidebar/paneles de chat) — el
+ * scrollbar del navegador por defecto (blanco, ancho) desentona con el resto
+ * del HUD. Transparente en reposo, visible recién al pasar el mouse por
+ * encima del contenedor: el contenido scrolleable no necesita gritar "acá
+ * hay más" todo el tiempo, solo cuando el usuario ya está interactuando.
+ */
+.kan-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.kan-scroll:hover {
+  scrollbar-color: color-mix(in srgb, var(--color-accent) 45%, transparent) transparent;
+}
+
+.kan-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.kan-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.kan-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 9999px;
+}
+
+.kan-scroll:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+
+.kan-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--color-accent) 70%, transparent);
+}
+
+/*
+ * Scroll-reveal (componente `Reveal`, components/ui/Reveal.tsx) — el
+ * elemento arranca invisible/desplazado y un IntersectionObserver agrega
+ * `.reveal-visible` la primera vez que entra al viewport (una sola vez, no
+ * se repite en cada scroll — evita distraer en listas largas como logs o
+ * jobs). `delay` (prop del componente, en ms) escalona filas consecutivas
+ * vía `animation-delay` inline.
+ */
+.reveal {
+  opacity: 0;
+  transform: translateY(14px);
+}
+
+.reveal-visible {
+  animation: reveal-up var(--duration-base) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes reveal-up {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/*
+ * Feedback de presión para botones solo-ícono (Trash2/Pencil/X/Menu/etc.) —
+ * ya existe en los botones primarios vía PRIMARY_BUTTON_CLASSES
+ * (active:scale-[0.98]), esto extiende el mismo criterio táctil a los
+ * secundarios que antes solo cambiaban de color al hover, sin nada al click.
+ */
+.press {
+  transition:
+    transform var(--duration-fast) cubic-bezier(0.16, 1, 0.3, 1),
+    background-color var(--duration-fast),
+    color var(--duration-fast);
+}
+
+.press:active {
+  transform: scale(0.95);
+}
+
+/*
+ * Boot sequence estilo JARVIS (BootSequence.tsx, ImmersiveChrome.tsx) — "KAN"
+ * con efecto de escritura + líneas de terminal + fade out. Una sola vez por
+ * sesión de browser (sessionStorage). Todo el timing vive acá
+ * (`animation-delay`), no en JS — ver comentario en BootSequence.tsx. ~3s en
+ * total: 600ms de escritura de "KAN", 3 líneas de terminal escalonadas
+ * arrancando a los 700ms (300ms entre cada una), una pausa breve, y 400ms de
+ * fade-out del overlay completo arrancando a los 2600ms.
+ */
+@keyframes kan-boot-typewriter {
+  from {
+    width: 0;
+  }
+  to {
+    width: 100%;
+  }
+}
+
+@keyframes kan-boot-cursor-blink {
+  0%,
+  100% {
+    border-color: transparent;
+  }
+  50% {
+    border-color: var(--color-accent);
+  }
+}
+
+.kan-boot-typewriter {
+  display: inline-block;
+  overflow: hidden;
+  width: 0;
+  white-space: nowrap;
+  border-right: 2px solid var(--color-accent);
+  animation:
+    kan-boot-typewriter 600ms steps(3, end) both,
+    kan-boot-cursor-blink 500ms step-end infinite;
+}
+
+@keyframes kan-boot-line-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.kan-boot-line {
+  opacity: 0;
+  animation: kan-boot-line-in 300ms ease-out var(--kan-boot-line-delay, 0ms) both;
+}
+
+@keyframes kan-boot-overlay-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.kan-boot-overlay {
+  animation: kan-boot-overlay-out 400ms ease-in both;
+  animation-delay: 2600ms;
+}
+
+/*
+ * Modo Presentación JARVIS (`JARVISDisplay`, `HudPanel`) — la bolita/pulso
+ * de la transición reusa `.kan-core-listening` (ya existe arriba), así que
+ * acá solo van los efectos propios de la HUD: paneles que "materializan"
+ * (escalan desde 0 + fade), bordes SVG que se dibujan solos, gráficas que
+ * se revelan de izquierda a derecha, y el overlay de scanlines. `--hud-delay`
+ * (custom property, hereda por cascada — a diferencia de `animation-delay`,
+ * que no es heredable por sí sola) deja escalonar varios paneles desde un
+ * único `style` en el elemento raíz de cada uno.
+ */
+@keyframes hud-materialize {
+  from {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.hud-panel {
+  --hud-delay: 0ms;
+  animation: hud-materialize 500ms cubic-bezier(0.16, 1, 0.3, 1) var(--hud-delay) both;
+}
+
+@keyframes hud-border-draw {
+  from {
+    stroke-dashoffset: 480;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.hud-panel-border-path {
+  stroke-dasharray: 480;
+  stroke-dashoffset: 480;
+  animation: hud-border-draw 900ms ease-out var(--hud-delay) both;
+}
+
+@keyframes hud-reveal-x {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+.hud-chart-reveal {
+  animation: hud-reveal-x 900ms ease-out var(--hud-delay) both;
+}
+
+/* Overlay de líneas de escaneo horizontales — opacidad muy sutil (~3%), puramente decorativo (`pointer-events: none` lo pone quien lo usa). */
+.hud-scanlines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.035) 0px,
+    rgba(255, 255, 255, 0.035) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/*
+ * Personalidad JARVIS del orb (KANAvatar.tsx) — respiración "viva" en
+ * reposo: una segunda capa de glow con un período distinto (7.4s) al de
+ * `kan-core-idle` (3.2s) para que la superposición de los dos ciclos casi
+ * nunca se sienta como un loop perfecto y repetitivo.
+ */
+@keyframes kan-idle-shimmer {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(1.08);
+  }
+}
+
+.kan-idle-shimmer {
+  animation: kan-idle-shimmer 7.4s ease-in-out infinite;
+}
+
+/*
+ * Wake flare (KANAvatar.tsx, prop `flare`) — anillo que se expande y
+ * desvanece una vez, para momentos puntuales (wake word, mic manual).
+ * Reusa el `@keyframes glow-pulse` ya existente (no se duplica), solo con
+ * timing propio: una sola pasada corta en vez del loop infinito de 2s que
+ * usa `.animate-glow-pulse`.
+ */
+.kan-wake-flare {
+  animation: glow-pulse 700ms ease-out 1;
+}
+
+/*
+ * Estética "JARVIS real" de la interfaz inmersiva — grilla de fondo,
+ * anillos del orb, barra de estado y tipografía HUD.
+ */
+
+/* Grilla de fondo (ImmersiveChrome.tsx) — líneas de 1px cada 40px, `--kan-accent` al 4%. Dos gradientes repetidos (uno por eje) sobre negro, sin imagen. */
+.kan-grid-bg {
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--kan-accent) 4%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--kan-accent) 4%, transparent) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* Anillos concéntricos del orb (OrbRings.tsx) — tres velocidades bien distintas para que nunca se sientan sincronizados; el del medio gira al revés a propósito (se lee más "radar" que si los tres giraran igual). */
+@keyframes kan-ring-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.kan-orb-ring-1 {
+  animation: kan-ring-rotate 10s linear infinite;
+}
+.kan-orb-ring-2 {
+  animation: kan-ring-rotate 25s linear infinite reverse;
+}
+.kan-orb-ring-3 {
+  animation: kan-ring-rotate 40s linear infinite;
+}
+
+/*
+ * Orb compacto (ImmersiveOrb.tsx, prop `compact`) — con alguna ventana
+ * flotante abierta, el orb se achica y se corre a la esquina inferior
+ * izquierda, libre de los otros elementos fijos (sonido arriba-izquierda,
+ * hamburguesa arriba-derecha, "+" abajo-derecha, StatusBar los 36px de
+ * abajo). Un solo `transform` (traslación + escala juntas) para que el
+ * cambio de lugar y de tamaño se anime como un solo movimiento fluido, no
+ * dos por separado. El estado base (centrado) también vive acá, no en
+ * clases de Tailwind sueltas — mezclar las dos formas de componer
+ * `transform` en el mismo elemento (variables de Tailwind vs. este
+ * `transform` literal) podía pisarse entre sí.
+ */
+.kan-orb-anchor {
+  transition: transform var(--duration-slow) cubic-bezier(0.16, 1, 0.3, 1);
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.kan-orb-anchor.kan-orb-compact {
+  transform: translate(calc(-50% - 50vw + 110px), calc(-50% + 50vh - 110px)) scale(0.42);
+}
+
+/*
+ * Tipografía HUD compartida (StatusBar.tsx, StatusPanel.tsx,
+ * SensorWindowContent.tsx) — mono, mayúsculas, tracking marcado, tamaño
+ * chico. Un solo lugar para no repetir la misma combinación de clases
+ * Tailwind en cada componente que necesita un label corto tipo "TEMP"/
+ * "STATUS".
+ */
+.kan-hud-label {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  font-size: 0.6875rem;
+}
+
+/*
+ * Refuerzo del tema oscuro de los diagramas Mermaid (MermaidDiagram.tsx,
+ * clase `.kan-mermaid` en el wrapper) — `!important` a propósito: mermaid
+ * embebe su propio `<style>` DENTRO del SVG que devuelve (`.node rect { fill:
+ * ... }` sin `!important`, ver mermaidConfig.ts para el detalle de por qué
+ * `themeVariables` sola no alcanzó dos veces seguidas en la práctica). Esta
+ * regla gana siempre, sin depender de en qué orden mermaid arme su propio
+ * `<style>` ni de cómo cada tema derive sus variables — la garantía visual
+ * vive acá, no solo en la config.
+ */
+.kan-mermaid .node rect,
+.kan-mermaid .node circle,
+.kan-mermaid .node ellipse,
+.kan-mermaid .node polygon,
+.kan-mermaid .node path {
+  fill: #111111 !important;
+  stroke: var(--kan-accent) !important;
+}
+
+.kan-mermaid .cluster rect {
+  fill: #0a0a0a !important;
+  stroke: var(--kan-accent) !important;
+}
+
+.kan-mermaid text,
+.kan-mermaid .nodeLabel,
+.kan-mermaid .edgeLabel,
+.kan-mermaid .label {
+  fill: #ffffff !important;
+  color: #ffffff !important;
+}
+
+.kan-mermaid .edgePath .path,
+.kan-mermaid .flowchart-link {
+  stroke: var(--kan-accent) !important;
+}
+
+.kan-mermaid .arrowheadPath {
+  fill: var(--kan-accent) !important;
+  stroke: none !important;
+}
+
+/*
+ * Respeta `prefers-reduced-motion` a nivel global — quien pide menos
+ * movimiento al sistema operativo recibe las animaciones casi
+ * instantáneas en vez de desactivarlas a mitad de camino de forma
+ * inconsistente.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .reveal {
+    opacity: 1;
+    transform: none;
+  }
+}
