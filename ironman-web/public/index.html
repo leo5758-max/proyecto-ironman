@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>JARVIS · Ironman</title>
+<style>
+  :root{--bg:#05080d;--panel:#0b121b;--line:#12324a;--cy:#38d6ff;--tx:#d6eaf5;--mut:#6d8aa0;--ok:#3ddc97;--bad:#ff6b6b}
+  *{box-sizing:border-box}
+  body{margin:0;height:100dvh;display:flex;flex-direction:column;background:radial-gradient(circle at 50% -10%,#0d2236,var(--bg) 60%);color:var(--tx);font:15px/1.5 system-ui,Segoe UI,sans-serif}
+  header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  h1{margin:0;font-size:16px;letter-spacing:.25em;color:var(--cy);font-weight:600}
+  .orb{width:14px;height:14px;border-radius:50%;background:var(--cy);box-shadow:0 0 14px var(--cy);animation:p 2.4s infinite}
+  .orb.busy{animation-duration:.6s}
+  @keyframes p{50%{opacity:.35;transform:scale(.8)}}
+  .modos{margin-left:auto;display:flex;gap:14px;color:var(--mut);font-size:13px}
+  .via{display:block;margin-top:4px;font-size:11px;color:var(--mut)}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:var(--bad)}
+  .dot.ok{background:var(--ok)}
+  #log{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+  .m{max-width:min(760px,88%);padding:10px 14px;border-radius:12px;white-space:pre-wrap;word-wrap:break-word}
+  .m.u{align-self:flex-end;background:#10405a}
+  .m.a{align-self:flex-start;background:var(--panel);border:1px solid var(--line)}
+  form{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--line)}
+  input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--tx);padding:11px 14px;font:inherit}
+  input:focus{outline:1px solid var(--cy)}
+  form button{background:var(--panel);border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:0 16px;cursor:pointer;font:inherit}
+  form button.send{background:var(--cy);color:#04141c;font-weight:600;border:0}
+  form button.rec{background:var(--bad);color:#fff;border:0}
+  .hint{color:var(--mut);font-size:12px;padding:0 16px 8px}
+</style>
+</head>
+<body>
+<header>
+  <div class="orb" id="orb"></div><h1>J.A.R.V.I.S.</h1>
+  <div class="modos">
+    <span title="Motor local (Ollama)"><span class="dot" id="d-local"></span>Local</span>
+    <span title="Motor nube (Gemini)"><span class="dot" id="d-nube"></span>Nube</span>
+  </div>
+  <label style="color:var(--mut);font-size:13px"><input type="checkbox" id="voz" style="flex:none"> Hablar respuestas</label>
+</header>
+<div id="log"></div>
+<div class="hint">Comandos: <b>recuerda …</b> · <b>memoria</b> · <b>olvida N</b> — o escribe / usa 🎤 para hablar.</div>
+<form id="f">
+  <button type="button" id="mic" title="Hablar">🎤</button>
+  <input id="t" autocomplete="off" placeholder="Escribe a JARVIS…" autofocus>
+  <button class="send">Enviar</button>
+</form>
+<script>
+const $=id=>document.getElementById(id);
+const log=$("log"), orb=$("orb");
+let historial=[], ocupado=false;
+
+function burbuja(cls,txt){const d=document.createElement("div");d.className="m "+cls;d.textContent=txt;log.append(d);log.scrollTop=log.scrollHeight;return d}
+
+async function estado(){
+  try{
+    const e=await (await fetch("/api/estado")).json();
+    $("d-local").classList.toggle("ok",e.local.disponible&&e.local.instalado);
+    $("d-nube").classList.toggle("ok",e.nube.disponible);
+    $("d-local").parentElement.title=e.local.disponible?(e.local.instalado?"Local listo ("+e.local.modelo+")":"Falta: ollama pull "+e.local.modelo):"Ollama no detectado";
+    $("d-nube").parentElement.title=e.nube.disponible?"Nube lista ("+e.nube.modelo+")":"Falta GEMINI_API_KEY en .env";
+    return e;
+  }catch{return null}
+}
+
+function hablar(txt){
+  if(!$("voz").checked||!window.speechSynthesis)return;
+  speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(txt.replace(/[*_`#]/g,""));u.lang="es-MX";
+  const v=speechSynthesis.getVoices().find(v=>v.lang.startsWith("es"));if(v)u.voice=v;
+  speechSynthesis.speak(u);
+}
+
+async function enviar(texto){
+  if(ocupado||!texto.trim())return;
+  ocupado=true;orb.classList.add("busy");
+  burbuja("u",texto);historial.push({role:"user",content:texto});
+  const b=burbuja("a","…");let acum="";
+  try{
+    const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mensajes:historial})});
+    const motor=r.headers.get("X-Motor");
+    const rd=r.body.getReader(),dec=new TextDecoder();
+    for(;;){const {done,value}=await rd.read();if(done)break;acum+=dec.decode(value,{stream:true});b.textContent=acum;log.scrollTop=log.scrollHeight}
+    if(motor==="local"||motor==="nube"){const v=document.createElement("small");v.className="via";v.textContent="vía "+(motor==="local"?"Jarvis local":"KAN nube");b.append(v)}
+  }catch(e){acum="⚠ No pude contactar con el servidor: "+e.message;b.textContent=acum}
+  historial.push({role:"assistant",content:acum});
+  hablar(acum);
+  ocupado=false;orb.classList.remove("busy");
+}
+
+$("f").onsubmit=e=>{e.preventDefault();const t=$("t").value;$("t").value="";enviar(t)};
+
+// Voz de entrada (Chrome/Edge)
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+if(!SR){$("mic").style.display="none"}else{
+  const rec=new SR();rec.lang="es-MX";rec.interimResults=false;
+  rec.onresult=e=>{$("voz").checked=true;enviar(e.results[0][0].transcript)};
+  rec.onend=()=>$("mic").classList.remove("rec");
+  $("mic").onclick=()=>{speechSynthesis.cancel();$("mic").classList.add("rec");rec.start()};
+}
+
+(async()=>{
+  const e=await estado();
+  if(e){
+    burbuja("a","Sistemas en línea. Tengo "+e.recuerdos+" recuerdo(s) guardado(s). ¿En qué trabajamos?");
+  }else burbuja("a","⚠ El servidor no responde. ¿Sigue corriendo `node server.mjs`?");
+})();
+</script>
+</body>
+</html>
