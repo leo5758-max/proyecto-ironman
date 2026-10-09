@@ -1,0 +1,163 @@
+import WebSocket from "ws";
+import type { CoreToEdgeMessage, EdgeToCoreMessage } from "@kan/plugin-contract";
+import type { CoreConnectionPort, CoreConnectionStatus, Unsubscribe } from "../domain/ports/CoreConnectionPort";
+import type { LoggerPort } from "../domain/ports/LoggerPort";
+import type { EdgeAgentBus } from "../application/EdgeAgentBus";
+
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const MAX_BACKOFF_MS = 30_000;
+/**
+ * Cola offline (fix de auditoría de backend): antes, `send()` con el WS
+ * caído simplemente descartaba el mensaje en silencio — un `audit.local` o
+ * `telemetry` disparado mientras el Core Cloud está inalcanzable se perdía
+ * para siempre. Tope razonable para no crecer sin límite mientras dura un
+ * corte largo; al llegar acá se descarta el mensaje más viejo (FIFO), no el
+ * que se está por encolar — el mensaje nuevo siempre es al menos tan
+ * relevante como el que reemplaza.
+ */
+export const MAX_QUEUE_SIZE = 200;
+
+/**
+ * Conexión saliente y persistente hacia el Core Cloud (requisito 8;
+ * docs/07-arquitectura-comunicacion.md sección 2: siempre saliente desde el
+ * Edge Agent, nunca al revés). Sin un servidor real todavía (ADR-009,
+ * incremento siguiente), esto queda reintentando con backoff exponencial —
+ * comportamiento correcto que además demuestra el Modo Offline (requisito 14):
+ * nada más en el Edge Agent depende de que esta conexión exista. Los
+ * mensajes mandados mientras está caída se encolan (`pendingQueue`) y se
+ * reenvían en orden apenas se reconecta, en vez de perderse.
+ */
+export class CoreWebSocketClient implements CoreConnectionPort {
+  private ws: WebSocket | undefined;
+  private _status: CoreConnectionStatus = "disconnected";
+  private reconnectAttempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  private readonly messageHandlers: Array<(message: CoreToEdgeMessage) => void> = [];
+  private readonly statusHandlers: Array<(status: CoreConnectionStatus) => void> = [];
+  private readonly pendingQueue: EdgeToCoreMessage[] = [];
+  private stopped = true;
+
+  constructor(
+    private readonly url: string,
+    private readonly authToken: string,
+    private readonly bus: EdgeAgentBus,
+    private readonly logger: LoggerPort,
+  ) {}
+
+  get status(): CoreConnectionStatus {
+    return this._status;
+  }
+
+  start(): void {
+    this.stopped = false;
+    this.connect();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    clearTimeout(this.reconnectTimer);
+    clearInterval(this.heartbeatTimer);
+    this.ws?.close();
+    this.setStatus("disconnected");
+  }
+
+  send(message: EdgeToCoreMessage): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+      return;
+    }
+    if (this.pendingQueue.length >= MAX_QUEUE_SIZE) {
+      this.pendingQueue.shift();
+      this.logger.warn(`Cola offline del Core Cloud llena (${MAX_QUEUE_SIZE}) — se descarta el mensaje más viejo.`);
+    }
+    this.pendingQueue.push(message);
+  }
+
+  /** Cuántos mensajes esperan a que la conexión vuelva — expuesto para diagnóstico/tests, no forma parte de CoreConnectionPort. */
+  get queuedMessageCount(): number {
+    return this.pendingQueue.length;
+  }
+
+  private flushQueue(): void {
+    if (this.pendingQueue.length === 0) return;
+    const pending = this.pendingQueue.splice(0, this.pendingQueue.length);
+    this.logger.info(`Reenviando ${pending.length} mensaje(s) acumulados mientras el Core Cloud estaba caído`);
+    for (const message of pending) {
+      this.send(message);
+    }
+  }
+
+  onMessage(handler: (message: CoreToEdgeMessage) => void): Unsubscribe {
+    this.messageHandlers.push(handler);
+    return () => {
+      const index = this.messageHandlers.indexOf(handler);
+      if (index !== -1) this.messageHandlers.splice(index, 1);
+    };
+  }
+
+  onStatusChange(handler: (status: CoreConnectionStatus) => void): Unsubscribe {
+    this.statusHandlers.push(handler);
+    return () => {
+      const index = this.statusHandlers.indexOf(handler);
+      if (index !== -1) this.statusHandlers.splice(index, 1);
+    };
+  }
+
+  private connect(): void {
+    this.setStatus(this.reconnectAttempt === 0 ? "connecting" : "reconnecting");
+
+    try {
+      this.ws = new WebSocket(this.url, { headers: { authorization: `Bearer ${this.authToken}` } });
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
+
+    this.ws.on("open", () => {
+      this.reconnectAttempt = 0;
+      this.setStatus("connected");
+      this.logger.info("Conectado al Core Cloud");
+      this.flushQueue();
+      this.heartbeatTimer = setInterval(() => {
+        this.send({ type: "heartbeat", at: new Date().toISOString() });
+      }, HEARTBEAT_INTERVAL_MS);
+    });
+
+    this.ws.on("message", (raw) => {
+      try {
+        const message = JSON.parse(raw.toString()) as CoreToEdgeMessage;
+        this.messageHandlers.forEach((handler) => handler(message));
+      } catch {
+        this.logger.warn("Mensaje inválido recibido del Core");
+      }
+    });
+
+    this.ws.on("close", () => {
+      clearInterval(this.heartbeatTimer);
+      if (!this.stopped) this.scheduleReconnect();
+    });
+
+    this.ws.on("error", (error) => {
+      // El evento "close" se dispara justo después y ya dispara el reconnect;
+      // esto solo deja constancia de la causa (antes se perdía en silencio).
+      this.logger.warn(`Error en la conexión al Core Cloud: ${error.message}`);
+    });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped) return;
+    this.setStatus("reconnecting");
+    const baseDelay = Math.min(1000 * 2 ** this.reconnectAttempt, MAX_BACKOFF_MS);
+    // Jitter: evita que múltiples Edge Agents reconecten todos en el mismo instante tras una caída del Gateway.
+    const delay = baseDelay / 2 + Math.random() * (baseDelay / 2);
+    this.reconnectAttempt += 1;
+    this.reconnectTimer = setTimeout(() => this.connect(), delay);
+  }
+
+  private setStatus(status: CoreConnectionStatus): void {
+    this._status = status;
+    this.bus.emit("core.status", { status });
+    this.statusHandlers.forEach((handler) => handler(status));
+  }
+}

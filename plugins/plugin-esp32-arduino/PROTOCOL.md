@@ -1,0 +1,53 @@
+# Protocolo de cable — `plugin-esp32-arduino`
+
+Una línea de texto por mensaje, terminada en `\n`, con un objeto JSON. Half-duplex: el driver Node nunca manda un comando nuevo sin haber recibido la respuesta del anterior (o agotado el timeout). El firmware nunca envía nada por su cuenta.
+
+El protocolo es el mismo sin importar el transporte:
+
+- **Serial** — 115200 baud (`kan_esp32_bridge.ino`).
+- **WiFi (TCP)** — puerto 8266 por defecto (`kan_esp32_bridge_wifi.ino`). El driver Node reconecta solo ante una caída transitoria (backoff exponencial, hasta 5 intentos) — ver `LineConnection`/`NodeTcpTransport` en `src/`.
+
+## Comandos (Node → dispositivo)
+
+| Comando | Payload | Descripción |
+|---|---|---|
+| `ping` | `{"cmd":"ping"}` | Handshake de descubrimiento. |
+| `read_digital` | `{"cmd":"read_digital","pin":<int>}` | Lee `digitalRead(pin)`. **Nunca llama `pinMode()`** (ver nota abajo — ADR-058). |
+| `read_analog` | `{"cmd":"read_analog","pin":<int>}` | Lee `analogRead(pin)`. |
+| `read_all` | `{"cmd":"read_all","digitalPins":[<int>,...],"analogPins":[<int>,...]}` | Lee varios pines en una sola ida y vuelta (usado por `discover_io_map`, ADR-058). La lista de pines la decide Node (`ESP32_PIN_MAP`) — el firmware sigue sin mapa propio. Nunca llama `pinMode()`, igual que `read_digital`. |
+| `write_digital` | `{"cmd":"write_digital","pin":<int>,"value":<bool>}` | `digitalWrite(pin, value ? HIGH : LOW)`. |
+| `write_analog` | `{"cmd":"write_analog","pin":<int>,"value":<0-255>}` | `analogWrite(pin, value)` / `ledcWrite` según el pin. |
+
+## Respuestas (dispositivo → Node)
+
+Éxito: `{"ok":true, ...datos}`. Ejemplos:
+
+- `ping` → `{"ok":true,"device":"kan-esp32"}`
+- `read_digital` → `{"ok":true,"value":0}` o `{"ok":true,"value":1}`
+- `read_analog` → `{"ok":true,"value":2731}`
+- `read_all` → `{"ok":true,"digital":{"2":0,"4":1},"analog":{"34":2731}}` — claves son los números de pin como string.
+- `write_digital` / `write_analog` → `{"ok":true}`
+
+Error: `{"ok":false,"error":"<mensaje>"}`.
+
+## `read_digital`/`read_all` nunca reconfiguran el pin (ADR-058)
+
+Versiones anteriores de este firmware llamaban `pinMode(pin, INPUT)` antes de cada `digitalRead` — leer un pin que hoy está en `OUTPUT` sosteniendo un relé/motor/láser real lo apagaba/soltaba como efecto secundario de "solo mirar". Se corrigió: leer nunca cambia el modo del pin. Si el sketch nunca configuró ese pin (ni con `pinMode` propio del usuario ni con `write_digital`/`write_analog` de KAN), `digitalRead`/`read_all` devuelven el estado por defecto del pin en el silicio (normalmente flotante/indefinido) — comportamiento estándar de Arduino, no algo que este protocolo intente normalizar.
+
+## Qué NO valida el firmware
+
+El firmware es un puente "tonto": ejecuta lo que se le pide, sin decidir si es seguro. Toda la seguridad (severidad por defecto de cada capability, Safety Policy por pin, confirmación explícita del usuario) vive del lado de Node (`@kan/edge-agent-core`) — el firmware no tiene forma de saber qué hay físicamente conectado a un pin, así que no debe intentar decidirlo.
+
+## Seguridad (pendiente)
+
+**Estado actual del transporte WiFi: sin autenticación.** Cualquier dispositivo en la misma red que sepa `IP:puerto` puede conectarse por TCP y mandar comandos — incluyendo escrituras a un pin conectado a una máquina física real (ej. mover un láser, activar un relé). Esto es aceptable únicamente en una red doméstica de confianza total; **no exponer este puerto a una red no confiable ni a internet**.
+
+El transporte Serial no tiene este problema — requiere acceso físico al puerto USB.
+
+**Diseño planeado (no implementado todavía):**
+
+1. Al conectar, antes de aceptar cualquier otro comando, el cliente (Node) manda `{"cmd":"auth","token":"<token>"}`.
+2. El firmware compara el token contra uno configurado de antemano (ej. quemado en el sketch al flashear, o guardado en NVS). Si coincide: `{"ok":true}` y la conexión queda habilitada para el resto de los comandos. Si no coincide, o el primer comando no es `auth`: `{"ok":false,"error":"no autorizado"}` y el firmware cierra la conexión.
+3. `NetworkTransportPort.open()` ya acepta un `options.token` para esto (`TransportOptions`, movido a `@kan/serial-line-transport` — ver `packages/serial-line-transport/src/NetworkTransportPort.ts`) — hoy no se usa, es el punto de enganche cuando esto se implemente. Ver el `TODO(seguridad)` en `packages/serial-line-transport/src/infra/NodeTcpTransport.ts`.
+
+Bloqueante recomendado antes de usar el transporte WiFi contra cualquier dispositivo con capacidad de causar daño físico real (motores, relés de potencia, láseres) fuera de un banco de pruebas controlado.
